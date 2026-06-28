@@ -40,22 +40,62 @@ fn main() {
     }
 }
 
-/// Sidecar file holding the last-synced baseline (revision + markdown) next to the
-/// working file, so a one-shot `sync` knows the common ancestor for a 3-way merge.
-fn baseline_path(file: &Path) -> PathBuf {
-    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    file.with_file_name(format!(".{name}.gdocdown.json"))
+// --- Baseline store -------------------------------------------------------
+//
+// A one-shot `sync` needs the *common ancestor* (the markdown where the file and
+// doc last agreed) to do a 3-way merge. We persist it as the last-synced baseline:
+// one small JSON file per (doc, file) pair, kept under `~/.gdocdown/` so it stays
+// out of the user's working directory. (FUTURE: use per-OS state dirs — see README.)
+
+/// `~/.gdocdown/`, created on demand.
+fn baseline_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or("HOME not set")?;
+    let dir = PathBuf::from(home).join(".gdocdown");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
 }
 
-fn write_baseline(file: &Path, rev: &str, md: &str) -> Result<(), String> {
-    let v = serde_json::json!({ "rev": rev, "md": md });
-    std::fs::write(baseline_path(file), serde_json::to_vec_pretty(&v).unwrap()).map_err(|e| e.to_string())
+/// Absolute path of `file`, stable even before it exists (the parent dir must
+/// exist; we canonicalize that and append the name). Used as part of the key.
+fn abs_path(file: &Path) -> PathBuf {
+    if let Ok(c) = file.canonicalize() {
+        return c;
+    }
+    let name = file.file_name().map(PathBuf::from).unwrap_or_default();
+    let parent = file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    parent.canonicalize().map(|p| p.join(name)).unwrap_or_else(|_| file.to_path_buf())
 }
 
-fn read_baseline(file: &Path) -> Result<(String, String), String> {
-    let raw = std::fs::read_to_string(baseline_path(file))
+/// Stable 64-bit FNV-1a hash, hex-encoded — deterministic across runs/machines
+/// (unlike `DefaultHasher`), so a baseline file name is reproducible.
+fn key_hash(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+fn baseline_path(doc: &str, file: &Path) -> Result<PathBuf, String> {
+    let key = format!("{doc}\0{}", abs_path(file).display());
+    Ok(baseline_dir()?.join(format!("{}.json", key_hash(&key))))
+}
+
+fn write_baseline(doc: &str, file: &Path, rev: &str, md: &str) -> Result<(), String> {
+    let v = serde_json::json!({ "doc": doc, "path": abs_path(file).display().to_string(), "rev": rev, "md": md });
+    std::fs::write(baseline_path(doc, file)?, serde_json::to_vec_pretty(&v).unwrap()).map_err(|e| e.to_string())
+}
+
+fn read_baseline(doc: &str, file: &Path) -> Result<(String, String), String> {
+    let raw = std::fs::read_to_string(baseline_path(doc, file)?)
         .map_err(|_| format!("no baseline for {} — run `gdocdown pull` first", file.display()))?;
     let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    // Defensive: the key already includes the doc id, but verify the stored record
+    // matches so a hash collision or hand-edit can't merge against the wrong base.
+    if v["doc"].as_str() != Some(doc) {
+        return Err(format!("baseline for {} belongs to a different doc — run `gdocdown pull`", file.display()));
+    }
     Ok((
         v["rev"].as_str().unwrap_or_default().to_string(),
         v["md"].as_str().unwrap_or_default().to_string(),
@@ -68,7 +108,7 @@ fn read_baseline(file: &Path) -> Result<(String, String), String> {
 fn pull(doc: &str, file: &str, force: bool) -> Result<(), String> {
     let path = Path::new(file);
     if !force {
-        match read_baseline(path) {
+        match read_baseline(doc, path) {
             Ok((_, base_md)) if std::fs::read_to_string(path).unwrap_or_default() != base_md => {
                 return Err(format!(
                     "{} has local edits that pull would discard — `gdocdown sync` to merge them, \
@@ -89,7 +129,7 @@ fn pull(doc: &str, file: &str, force: bool) -> Result<(), String> {
     let d = docs.get(doc);
     let md = model_to_markdown(&document_to_model(&d));
     std::fs::write(path, &md).map_err(|e| e.to_string())?;
-    write_baseline(path, &rev_of(&d), &md)?;
+    write_baseline(doc, path, &rev_of(&d), &md)?;
     println!("pulled {doc} -> {file}");
     Ok(())
 }
@@ -99,7 +139,7 @@ fn pull(doc: &str, file: &str, force: bool) -> Result<(), String> {
 /// conflicts are written to the file only. Requires a prior `pull`.
 fn sync(doc: &str, file: &str) -> Result<(), String> {
     let path = Path::new(file);
-    let (base_rev, base_md) = match read_baseline(path) {
+    let (base_rev, base_md) = match read_baseline(doc, path) {
         Ok(b) => b,
         // No baseline yet: if there's nothing local to lose, bootstrap by pulling;
         // otherwise refuse rather than guess (use `pull`/`push` to pick a side).
@@ -116,7 +156,7 @@ fn sync(doc: &str, file: &str) -> Result<(), String> {
     };
     let docs = Docs::new();
     match reconcile(&docs, doc, path, &base_rev, &base_md)? {
-        Some((rev, md)) => write_baseline(path, &rev, &md)?,
+        Some((rev, md)) => write_baseline(doc, path, &rev, &md)?,
         None => println!("nothing to sync (file and doc match the baseline)"),
     }
     Ok(())
@@ -132,7 +172,7 @@ fn push(doc: &str, file: &str, force: bool) -> Result<(), String> {
     let docs = Docs::new();
     let before = docs.get(doc);
     if !force {
-        match read_baseline(path) {
+        match read_baseline(doc, path) {
             Ok((base_rev, _)) if base_rev == rev_of(&before) => {} // doc hasn't moved — safe
             Ok(_) => {
                 return Err(
@@ -153,7 +193,7 @@ fn push(doc: &str, file: &str, force: bool) -> Result<(), String> {
     for w in &warnings {
         println!("  \u{26a0} {w}");
     }
-    write_baseline(path, &rev_of(&docs.get(doc)), &md)?; // doc now equals the file
+    write_baseline(doc, path, &rev_of(&docs.get(doc)), &md)?; // doc now equals the file
     println!("pushed {file} -> {doc}");
     Ok(())
 }

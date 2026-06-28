@@ -196,7 +196,8 @@ should *emit* `* ` to stay symmetric.
       on overlapping edits.
 - [x] **Merge-safe one-shot `sync`** — the controlled-mode counterpart to `watch`,
       for an editor/agent working alongside live collaborators. `pull` records a
-      baseline (a `.<file>.gdocdown.json` sidecar); `sync` 3-way merges the file
+      baseline under `~/.gdocdown/` (one file per doc+path, keyed by a stable
+      hash, recording `{doc, path, rev, md}`); `sync` 3-way merges the file
       against that baseline and the live doc (same `reconcile` as `watch`) then
       pushes — clean merge converges both sides, a conflict writes markers to the
       **file only**. `sync` self-bootstraps (no baseline + empty/absent file →
@@ -207,6 +208,11 @@ should *emit* `* ` to stay symmetric.
       `pull → edit → sync` loop and gdocdown's markdown flavor (so its edits don't
       churn). Copy it into your `~/.claude/skills/` to use gdocdown from Claude Code.
 - [ ] FUSE mount (Phase B) — needs `libfuse3-dev` + the `fuser` crate.
+- [ ] **Cross-platform citizenship** — today the baseline store hard-codes
+      `~/.gdocdown/` (Linux-first). One day, honor each platform's conventions
+      (XDG `~/.local/state` on Linux, `~/Library/Application Support` on macOS,
+      `%LOCALAPPDATA%` on Windows — e.g. via the `directories` crate), and audit
+      path/line-ending handling for Windows.
 
 ## Run
 

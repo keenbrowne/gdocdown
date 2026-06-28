@@ -103,7 +103,8 @@ to add or edit them. Deleting text that a comment is anchored to may orphan it.
 (equations, smart chips, mid-document section breaks), the doc has something
 gdocdown can't safely model. Don't force it with `push`; tell the user.
 
-## Don't touch
+## Baseline state
 
-The `.<file>.gdocdown.json` sidecar next to the file is gdocdown's baseline state.
-Don't edit, move, or commit it. Deleting it forces the next `sync` to re-pull.
+gdocdown keeps per-doc baseline state under `~/.gdocdown/` (not next to your file).
+You don't need to touch it; if it's ever missing or stale, the next `sync` just
+re-pulls.
