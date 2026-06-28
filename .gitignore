@@ -1,0 +1,5 @@
+/target
+credentials.json
+*.token
+tests/fixture.docid
+.claude/
