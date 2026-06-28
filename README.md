@@ -194,6 +194,18 @@ should *emit* `* ` to stay symmetric.
       baseline; token re-mints every 30 min. Verified live: push, pull, no
       feedback loop, clean merge of non-overlapping edits, and conflict markers
       on overlapping edits.
+- [x] **Merge-safe one-shot `sync`** — the controlled-mode counterpart to `watch`,
+      for an editor/agent working alongside live collaborators. `pull` records a
+      baseline (a `.<file>.gdocdown.json` sidecar); `sync` 3-way merges the file
+      against that baseline and the live doc (same `reconcile` as `watch`) then
+      pushes — clean merge converges both sides, a conflict writes markers to the
+      **file only**. `sync` self-bootstraps (no baseline + empty/absent file →
+      pull), so it's the only command you normally type. `pull`/`push` remain the
+      explicit take-theirs / take-mine overrides. Live tested (concurrent
+      agent-edit + collaborator-edit merge cleanly).
+- [x] **Agent skill** — `.claude/skills/gdocdown/SKILL.md` teaches an AI agent the
+      `pull → edit → sync` loop and gdocdown's markdown flavor (so its edits don't
+      churn). Copy it into your `~/.claude/skills/` to use gdocdown from Claude Code.
 - [ ] FUSE mount (Phase B) — needs `libfuse3-dev` + the `fuser` crate.
 
 ## Run
@@ -203,10 +215,29 @@ cargo test                          # engine unit + fuzz tests, fully offline
 cargo test --test live_sync -- --ignored --test-threads=1   # live round-trips
 
 # CLI (auth via gcloud Application Default Credentials):
-gdocdown pull  <docId> <file.md>    # doc  -> markdown file
-gdocdown push  <docId> <file.md>    # markdown file -> doc
-gdocdown watch <docId> <file.md>    # seed the file, then push on every save
+gdocdown sync  <docId> <file.md>    # merge (two-way, concurrent-edit safe) — use this
+gdocdown pull  <docId> <file.md>    # take theirs: file := doc  (refuses if file has edits)
+gdocdown push  <docId> <file.md>    # take mine:  doc := file  (refuses if doc moved)
+gdocdown watch <docId> <file.md>    # continuous: reconcile on every save / 3s poll
 ```
+
+`sync` is the everyday command (it self-bootstraps via pull on a fresh file).
+`pull`/`push` are the one-way overrides and follow git's blast-radius model: each
+**refuses by default when it would destroy work** — `pull` if the file has unsynced
+edits, `push` (force-with-lease style) if the doc advanced since your baseline —
+and takes `--force` to override. Only `push` can overwrite *others'* edits, so it's
+the one to respect.
+
+### Editing a doc with an AI agent (alongside collaborators)
+
+```
+gdocdown sync <docId> doc.md     # 1. seed the local file
+# 2. tell your agent to edit doc.md (small, targeted edits)
+gdocdown sync <docId> doc.md     # 3. merge agent edits with collaborators', then push
+```
+
+`.claude/skills/gdocdown/SKILL.md` packages this loop (plus the markdown-flavor
+rules) for Claude Code — copy it to `~/.claude/skills/gdocdown/`.
 
 ## You'll need (when we wire the real API)
 

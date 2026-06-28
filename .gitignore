@@ -2,4 +2,5 @@
 credentials.json
 *.token
 tests/fixture.docid
-.claude/
+.claude/settings.local.json
+.*.gdocdown.json
