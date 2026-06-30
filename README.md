@@ -214,6 +214,36 @@ should *emit* `* ` to stay symmetric.
       `%LOCALAPPDATA%` on Windows — e.g. via the `directories` crate), and audit
       path/line-ending handling for Windows.
 
+## Authentication
+
+`gdocdown` has no OAuth flow of its own — on every call it shells out to
+`gcloud auth application-default print-access-token` and sends that as a bearer
+token. It only uses the Docs API today (the Drive webhook is future work), so
+setup is just: get `gcloud`, then point ADC at an OAuth client with the Docs
+scope.
+
+**One manual step (can't be scripted):** in a Google Cloud project, enable the
+[Docs API](https://console.cloud.google.com/apis/library/docs.googleapis.com)
+and create a **Desktop app** OAuth client (APIs & Services → Credentials), then
+download its JSON. Keep that file out of the repo. Then:
+
+```bash
+gcloud services enable docs.googleapis.com   # once per project
+gdocdown auth login --client-id-file <path-to-oauth-client.json>
+gdocdown auth status                          # confirms ADC can mint a token
+```
+
+`gdocdown auth login` runs the ADC login with the scopes gdocdown needs baked in.
+Use **your own** Desktop client — Google blocks gcloud's built-in client on
+sensitive Workspace scopes. The target doc must be shared with the account you
+log in as.
+
+**If it fails:** `gcloud: not found` → install the
+[Google Cloud CLI](https://cloud.google.com/sdk/docs/install). `Reauthentication
+failed` or a Docs `403` → re-run `gdocdown auth login` (token expired, or the doc
+isn't shared with you). `This app is blocked` → you used the default client; pass
+`--client-id-file`.
+
 ## Run
 
 ```
@@ -244,9 +274,3 @@ gdocdown sync <docId> doc.md     # 3. merge agent edits with collaborators', the
 
 `.claude/skills/gdocdown/SKILL.md` packages this loop (plus the markdown-flavor
 rules) for Claude Code — copy it to `~/.claude/skills/gdocdown/`.
-
-## You'll need (when we wire the real API)
-
-A Google Cloud project with the **Docs API** and **Drive API** enabled, plus an
-OAuth2 client (Desktop app) credentials JSON. This is the one step that can't be
-automated — everything up to it is testable without it.

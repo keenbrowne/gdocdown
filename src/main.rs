@@ -1,5 +1,7 @@
 //! gdocdown CLI: edit a Google Doc as a local markdown file.
 //!
+//!   gdocdown auth  login [--client-id-file <path>]  authenticate ADC (Docs scope)
+//!   gdocdown auth  status                           check ADC can mint a token
 //!   gdocdown pull  <docId> <file.md>   doc -> markdown file (records a baseline)
 //!   gdocdown sync  <docId> <file.md>   merge-safe one-shot: 3-way merge vs the
 //!                                       baseline, then push (concurrent-edit safe)
@@ -14,7 +16,7 @@
 //! Auth reuses Application Default Credentials (a fresh token is minted per
 //! operation, so a long-running `watch` survives token expiry).
 
-use gdocdown::api::{document_to_model, sync_apply, Docs};
+use gdocdown::api::{auth_login, auth_status, document_to_model, sync_apply, Docs};
 use gdocdown::{markdown_to_model, model_to_markdown};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
@@ -25,12 +27,18 @@ fn main() {
     let force = raw.iter().any(|a| a == "--force" || a == "-f");
     let args: Vec<&str> = raw.iter().map(String::as_str).filter(|a| *a != "--force" && *a != "-f").collect();
     let result = match args.as_slice() {
+        [_, "auth", "login", ..] => auth_login(client_id_file(&raw).as_deref()),
+        [_, "auth", "status"] => auth_status(),
+        [_, "auth", ..] => {
+            eprintln!("usage: gdocdown auth <login|status> [--client-id-file <path>]");
+            std::process::exit(2);
+        }
         [_, "pull", doc, file] => pull(doc, file, force),
         [_, "sync", doc, file] => sync(doc, file),
         [_, "push", doc, file] => push(doc, file, force),
         [_, "watch", doc, file] => watch(doc, file),
         _ => {
-            eprintln!("usage: gdocdown <sync|pull|push|watch> [--force] <docId> <file.md>");
+            eprintln!("usage: gdocdown <auth|sync|pull|push|watch> [--force] <docId> <file.md>");
             std::process::exit(2);
         }
     };
@@ -38,6 +46,20 @@ fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+/// Parse `--client-id-file <path>` or `--client-id-file=<path>` from the raw args.
+fn client_id_file(raw: &[String]) -> Option<String> {
+    let mut it = raw.iter();
+    while let Some(a) = it.next() {
+        if let Some(v) = a.strip_prefix("--client-id-file=") {
+            return Some(v.to_string());
+        }
+        if a == "--client-id-file" {
+            return it.next().cloned();
+        }
+    }
+    None
 }
 
 // --- Baseline store -------------------------------------------------------
@@ -125,7 +147,7 @@ fn pull(doc: &str, file: &str, force: bool) -> Result<(), String> {
             _ => {}
         }
     }
-    let docs = Docs::new();
+    let docs = Docs::try_new()?;
     let d = docs.get(doc);
     let md = model_to_markdown(&document_to_model(&d));
     std::fs::write(path, &md).map_err(|e| e.to_string())?;
@@ -154,7 +176,7 @@ fn sync(doc: &str, file: &str) -> Result<(), String> {
             ));
         }
     };
-    let docs = Docs::new();
+    let docs = Docs::try_new()?;
     match reconcile(&docs, doc, path, &base_rev, &base_md)? {
         Some((rev, md)) => write_baseline(doc, path, &rev, &md)?,
         None => println!("nothing to sync (file and doc match the baseline)"),
@@ -169,7 +191,7 @@ fn sync(doc: &str, file: &str) -> Result<(), String> {
 fn push(doc: &str, file: &str, force: bool) -> Result<(), String> {
     let md = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
     let path = Path::new(file);
-    let docs = Docs::new();
+    let docs = Docs::try_new()?;
     let before = docs.get(doc);
     if !force {
         match read_baseline(doc, path) {
@@ -294,7 +316,7 @@ fn watch(doc: &str, file: &str) -> Result<(), String> {
     };
     let target = path.file_name().ok_or("invalid file path")?.to_os_string();
 
-    let mut docs = Docs::new();
+    let mut docs = Docs::try_new()?;
     let mut minted = Instant::now();
 
     // Seed the file from the doc — establishes the synced baseline.

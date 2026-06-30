@@ -16,18 +16,65 @@ use std::process::Command;
 
 const DOCS: &str = "https://docs.googleapis.com/v1/documents";
 
-/// Mint an access token from Application Default Credentials. Never logged.
-pub fn access_token() -> String {
+/// Scopes gdocdown's ADC credentials need. `cloud-platform` is required by
+/// `gcloud` to create ADC; `documents` is what the Docs API calls actually use.
+const SCOPES: &str =
+    "https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/documents";
+
+/// Mint an access token from Application Default Credentials, or return an
+/// actionable error pointing at `gdocdown auth login`. Never logged.
+pub fn try_access_token() -> Result<String, String> {
     let out = Command::new("gcloud")
         .args(["auth", "application-default", "print-access-token"])
         .output()
-        .expect("failed to launch gcloud");
-    assert!(
-        out.status.success(),
-        "gcloud token failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap().trim().to_string()
+        .map_err(|e| {
+            format!("could not run gcloud ({e}) — install the Google Cloud CLI, then run `gdocdown auth login`")
+        })?;
+    if !out.status.success() {
+        return Err(format!(
+            "gcloud could not mint a token ({}) — run `gdocdown auth login` to (re)authenticate",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Mint an access token, panicking on failure. For tests and internal callers
+/// that treat missing auth as a programming error; the CLI uses [`Docs::try_new`].
+pub fn access_token() -> String {
+    try_access_token().unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Run the ADC login flow with the scopes gdocdown needs, using the user's own
+/// OAuth Desktop client. Google blocks gcloud's built-in client on sensitive
+/// Workspace scopes, so the client JSON is required.
+pub fn auth_login(client_id_file: Option<&str>) -> Result<(), String> {
+    let client = client_id_file.ok_or(
+        "auth login needs your OAuth Desktop client JSON: \
+         `gdocdown auth login --client-id-file <path>` \
+         (create one at https://console.cloud.google.com/apis/credentials)",
+    )?;
+    let status = Command::new("gcloud")
+        .args(["auth", "application-default", "login"])
+        .arg(format!("--scopes={SCOPES}"))
+        .arg(format!("--client-id-file={client}"))
+        .status()
+        .map_err(|e| format!("could not run gcloud ({e}) — install the Google Cloud CLI first"))?;
+    if !status.success() {
+        return Err("gcloud login did not complete".to_string());
+    }
+    try_access_token()?;
+    println!("authenticated — ADC is set up with the Docs scope");
+    Ok(())
+}
+
+/// Report whether ADC can currently mint a token. A working token doesn't prove
+/// the right scopes are present (a 403 on first call would reveal that), but it
+/// catches the common "not logged in / expired" case.
+pub fn auth_status() -> Result<(), String> {
+    try_access_token()?;
+    println!("authenticated — ADC can mint a token (run any sync to confirm doc access)");
+    Ok(())
 }
 
 pub struct Docs {
@@ -43,6 +90,12 @@ impl Default for Docs {
 impl Docs {
     pub fn new() -> Self {
         Docs { token: access_token() }
+    }
+
+    /// Like [`Docs::new`] but surfaces an actionable error instead of panicking,
+    /// so the CLI can print it cleanly and point the user at `gdocdown auth login`.
+    pub fn try_new() -> Result<Self, String> {
+        Ok(Docs { token: try_access_token()? })
     }
 
     fn bearer(&self) -> String {
